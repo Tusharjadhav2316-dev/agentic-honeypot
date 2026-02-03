@@ -1,14 +1,18 @@
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, Request
 from app.utils.auth import verify_api_key
-from typing import Optional, Dict
 
 router = APIRouter()
 
 @router.post("/honeypot")
-def honeypot_endpoint(
-    payload: Optional[Dict] = Body(default={}),
+async def honeypot_endpoint(
+    request: Request,
     auth=Depends(verify_api_key)
 ):
+    try:
+        payload = await request.json()
+    except:
+        payload = {}
+
     return {
         "status": "ok",
         "message": "Honeypot API is live and secured",
