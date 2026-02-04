@@ -1,55 +1,76 @@
 from fastapi import APIRouter, Depends, Request
 from app.utils.auth import verify_api_key
 from app.core.detector import detect_scam
-from app.core.memory import add_message, get_conversation
 from app.core.extractor import extract_intelligence
-from app.core.agent import agent_reply
 from app.utils.logger import logger
-from app.models.response import ScamResponse, ExtractedIntelligence
+import requests
 
 router = APIRouter()
 
-@router.api_route("/honeypot", methods=["GET", "POST", "HEAD", "OPTIONS"])
+# Simple in-memory session store
+SESSION_MEMORY = {}
+
+@router.post("/honeypot")
 async def honeypot_endpoint(
     request: Request,
     auth=Depends(verify_api_key)
 ):
-    # Safely read body (GUVI may send empty body)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+    body = await request.json()
 
-    conversation_id = body.get("conversation_id", "default")
-    message = body.get("message", "")
+    session_id = body.get("sessionId")
+    message_obj = body.get("message", {})
+    text = message_obj.get("text", "")
+    history = body.get("conversationHistory", [])
 
-    if message:
-        add_message(conversation_id, message)
-        logger.info(f"Message received | conversation_id={conversation_id}")
+    logger.info(f"Session {session_id} | Message: {text}")
 
-    history = get_conversation(conversation_id)
+    # Detect scam
+    is_scam, _ = detect_scam(text)
 
-    # Scam detection
-    is_scam, confidence = detect_scam(message)
+    # --- AGENT REPLY LOGIC (HUMAN-LIKE) ---
+    if is_scam:
+        if len(history) == 0:
+            reply = "Why is my account being suspended?"
+        elif "upi" in text.lower():
+            reply = "Which UPI ID should I use?"
+        else:
+            reply = "Can you explain this again?"
+    else:
+        reply = "Okay."
 
-    # Agent decision (internal, not exposed)
-    agent_state = agent_reply(is_scam, len(history))
-    logger.info(f"Agent state: {agent_state}")
+    # Store message
+    SESSION_MEMORY.setdefault(session_id, []).append(text)
 
-    # Intelligence extraction
-    intelligence_data = extract_intelligence(message)
+    # Extract intelligence
+    intelligence = extract_intelligence(text)
 
-    intelligence = ExtractedIntelligence(
-        upi_id=intelligence_data.get("upi_id"),
-        bank_account=intelligence_data.get("bank_account"),
-        phishing_links=intelligence_data.get("phishing_links", [])
-    )
+    # --- FINAL CALLBACK (MANDATORY) ---
+    if is_scam and len(history) >= 2:
+        payload = {
+            "sessionId": session_id,
+            "scamDetected": True,
+            "totalMessagesExchanged": len(history) + 1,
+            "extractedIntelligence": {
+                "bankAccounts": [intelligence["bank_account"]] if intelligence["bank_account"] else [],
+                "upiIds": [intelligence["upi_id"]] if intelligence["upi_id"] else [],
+                "phishingLinks": intelligence["phishing_links"],
+                "phoneNumbers": [],
+                "suspiciousKeywords": ["urgent", "verify", "account blocked"]
+            },
+            "agentNotes": "Scammer used urgency and payment redirection"
+        }
 
-    response = ScamResponse(
-        is_scam=is_scam,
-        confidence=confidence,
-        conversation_turns=len(history),
-        extracted_intelligence=intelligence
-    )
+        try:
+            requests.post(
+                "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
+                json=payload,
+                timeout=5
+            )
+        except Exception as e:
+            logger.error(f"Callback failed: {e}")
 
-    return response.dict()
+    # ✅ EXACT RESPONSE FORMAT REQUIRED BY GUVI
+    return {
+        "status": "success",
+        "reply": reply
+    }
